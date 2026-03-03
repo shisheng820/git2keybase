@@ -90,30 +90,42 @@ def backup_repo(repo_url):
             os.chdir("..")
         return # 跳过 release 下载
 
+# ==========================================
+    # 3. Release 附件备份 (智能兼容 GitHub & Gitea/Forgejo)
     # ==========================================
-    # 3. Release 附件备份 (仅支持 GitHub API)
-    # ==========================================
-    if not is_github:
-        print(f"ℹ️ 检测到 {domain} 不是 GitHub，当前跳过 Release 备份。")
-        return
+    print(f"🔍 尝试探测并检查 {domain} 的 Releases...")
 
-    print(f"🔍 检查 GitHub Releases...")
-    api_url = f"https://api.github.com/repos/{github_api_path}/releases?per_page=100"
-    headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
-    
+    # 根据域名智能组装 API URL
+    if is_github:
+        api_url = f"https://api.github.com/repos/{path}/releases?per_page=100"
+        headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
+    else:
+        # 尝试使用 Gitea/Forgejo/Gogs 通用的 V1 API
+        api_url = f"https://{domain}/api/v1/repos/{path}/releases?limit=100"
+        headers = {} # 暂不考虑自建站的 Token，走匿名公开读取
+
     try:
+        # 加入较短的 timeout 防止自建站由于网络问题卡死 Action
         resp = requests.get(api_url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        releases = resp.json()
         
-        if not releases:
-            print("ℹ️ 该仓库没有 Release，跳过。")
+        # 如果返回 404 或其他非 200 状态，说明平台不支持此 API，优雅跳过
+        if resp.status_code != 200:
+            print(f"ℹ️ 当前平台 {domain} 不支持兼容的 Release API 或无权访问 (HTTP {resp.status_code})，跳过 Release 备份。")
             return
 
+        releases = resp.json()
+        
+        # 容错：确保返回的是列表格式（兼容 GitHub/Gitea 数据结构）
+        if not releases or not isinstance(releases, list):
+            print("ℹ️ 该仓库没有 Release，或返回的数据格式无法识别，跳过。")
+            return
+
+        # 截取前 3 个最新的 Release
         top_releases = releases[:3]
         keep_tags = [r.get('tag_name', 'unknown') for r in top_releases]
         print(f"📌 目标备份版本 (Top 3): {', '.join(keep_tags)}")
 
+        # 唤醒 KBFS 并创建目录
         run_cmd(f"keybase fs ls /keybase/private/{USERNAME} > /dev/null 2>&1 || true")
         kb_release_base = f"/keybase/private/{USERNAME}/releases"
         kb_release_dir = f"{kb_release_base}/{safe_name}"
@@ -132,17 +144,26 @@ def backup_repo(repo_url):
                     print(f"  🗑️ 删除过期文件: {file}")
                     run_cmd(f"keybase fs rm {kb_release_dir}/{file}")
 
+        # 开始解析和下载 Asset
         for release in top_releases:
             tag_name = release.get('tag_name', 'unknown')
             for asset in release.get('assets', []):
-                file_name = f"{tag_name}_{asset['name']}"
+                file_name = f"{tag_name}_{asset.get('name', 'unknown_asset')}"
                 kb_file_path = f"{kb_release_dir}/{file_name}"
                 
                 check = run_cmd(f"keybase fs stat {kb_file_path}", silent_error=True)
                 if check.returncode != 0:
-                    print(f"  ⬇️ 下载大文件: {file_name} ({asset['size']/1024/1024:.2f} MB)")
+                    # Gitea 的 size 可能返回空，加个 get 容错
+                    size_mb = asset.get('size', 0) / 1024 / 1024
+                    print(f"  ⬇️ 下载大文件: {file_name} ({size_mb:.2f} MB)")
                     
-                    with requests.get(asset['browser_download_url'], stream=True, timeout=30) as r:
+                    # 防止部分自建站的 browser_download_url 缺失或不规范
+                    download_url = asset.get('browser_download_url')
+                    if not download_url:
+                        print(f"  ⚠️ 找不到下载链接，跳过 {file_name}")
+                        continue
+
+                    with requests.get(download_url, stream=True, timeout=60) as r:
                         r.raise_for_status()
                         with open(file_name, 'wb') as f:
                             for chunk in r.iter_content(chunk_size=8192):
@@ -154,8 +175,11 @@ def backup_repo(repo_url):
                     print(f"  ✅ {file_name} 备份成功")
                 else:
                     print(f"  ⏭️ {file_name} 已存在，跳过。")
+
+    except requests.exceptions.RequestException as e:
+        print(f"🚨 请求 Release API 失败 (可能是网络或 API 不兼容): {e}")
     except Exception as e:
-        print(f"🚨 Release 备份失败: {e}")
+        print(f"🚨 Release 备份发生意外错误: {e}")
 
 if __name__ == "__main__":
     if not os.path.exists("repos.txt"):

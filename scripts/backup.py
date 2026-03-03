@@ -24,7 +24,7 @@ def run_cmd(cmd, check=False, silent_error=False):
 
 def backup_repo(repo_url):
     print(f"\n{'='*50}")
-    print(f"🚀 开始处理仓库: {repo_url}")
+    print(f"🚀 开始处理仓库: {repo_name}")
     
     # ---------------------------------------------------------
     # 1. 智能解析 URL (兼容任意 Git 平台)
@@ -36,9 +36,12 @@ def backup_repo(repo_url):
     if path.endswith('.git'):
         path = path[:-4]
         
+    # 提取存储库名称（路径的最后一部分）
+    repo_name = path.split('/')[-1] if path else 'unknown'
+    
     # 生成安全的 Keybase 目录名 (例如 github.com/a/b -> github_com_a_b)
     safe_name = f"{domain.replace('.', '_')}_{path.replace('/', '_')}"
-    print(f"📁 映射为本地/Keybase目录: {safe_name}")
+    # print(f"📁 映射为本地/Keybase目录: {safe_name}")
 
     # 判断是否为 GitHub，以此决定是否注入 Token 以及是否抓取 Release
     is_github = (domain == "github.com")

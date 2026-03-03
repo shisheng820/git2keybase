@@ -2,7 +2,7 @@ name: Sync Repos & Releases to Keybase
 
 on:
   schedule:
-    - cron: '0 18 * * *'
+    - cron: '0 18 * * *'   # 每天定时运行
   workflow_dispatch:
 
 jobs:
@@ -22,24 +22,37 @@ jobs:
       - name: Install Python Dependencies
         run: pip install -r requirements.txt
 
+      # 缓存 Git 仓库目录，极大加快下次备份速度，真正实现增量拉取
+      - name: Cache Git Repositories
+        uses: actions/cache@v3
+        with:
+          path: ./*.git
+          key: git-repos-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            git-repos-${{ runner.os }}-
+
       - name: Install Keybase
         run: |
           sudo apt-get update
           sudo apt-get install -y curl
           curl -O https://prerelease.keybase.io/keybase_amd64.deb
           sudo dpkg -i keybase_amd64.deb || sudo apt-get install -f -y
-          keybase version
 
-      - name: Login via Paper Key
+      - name: Start Keybase Service & Login
         env:
           KEYBASE_USERNAME: ${{ secrets.KEYBASE_USERNAME }}
           KEYBASE_PAPERKEY: ${{ secrets.KEYBASE_PAPERKEY }}
         run: |
+          # 启动后台服务 (剔除容易出错的 FUSE 强挂载，保留必要的 daemon)
+          run_keybase -g
+          sleep 5
+          # 验证并登录
           echo "$KEYBASE_PAPERKEY" | keybase oneshot --username="$KEYBASE_USERNAME"
           keybase status
 
       - name: Run Backup Script
         env:
           KEYBASE_USERNAME: ${{ secrets.KEYBASE_USERNAME }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 使用内置 token，如果需要备份其他私有库，请在 Secrets 设置个人访问令牌 (PAT) 并替换这里
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: python scripts/backup.py

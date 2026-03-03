@@ -1,76 +1,127 @@
 import os
+import sys
 import subprocess
-import tempfile
 import requests
 from datetime import datetime
 
+# 获取环境变量
 USERNAME = os.environ.get('KEYBASE_USERNAME')
 GH_TOKEN = os.environ.get('GITHUB_TOKEN')
 
-def run_cmd(cmd):
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Warn: {result.stderr}")
-    return result
+def run_cmd(cmd, check=False):
+    """运行终端命令，加入异常处理"""
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=check)
+        if result.returncode != 0 and not check:
+            print(f"⚠️ 提示/警告: {result.stderr.strip()}")
+        return result
+    except subprocess.CalledProcessError as e:
+        print(f"❌ 严重错误: 命令 '{cmd}' 执行失败\n{e.stderr}")
+        raise
 
 def backup_repo(repo_path):
-    repo_name = repo_path.split('/')[-1]
-    print(f"\nStart backup: {repo_path}")
+    # 将 author/repo 转换为 author_repo，防止同名冲突
+    safe_name = repo_path.replace('/', '_')
+    print(f"\n{'='*50}")
+    print(f"🚀 开始处理仓库: {repo_path} -> 映射为: {safe_name}")
+    
+    # 注入 Token 以支持私有仓库 (HTTPS 方式)
+    git_url = f"https://x-access-token:{GH_TOKEN}@github.com/{repo_path}.git" if GH_TOKEN else f"https://github.com/{repo_path}.git"
+    repo_dir = f"{safe_name}.git"
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        run_cmd(f"keybase git create {repo_name}")
+    # ==========================================
+    # 1. 代码增量备份 (结合 Actions 缓存)
+    # ==========================================
+    try:
+        # 确保 Keybase 存在该仓库 (即使存在报错也不中断)
+        run_cmd(f"keybase git create {safe_name} || true")
+        
+        if os.path.exists(repo_dir):
+            print("📦 发现本地缓存，执行增量 Fetch...")
+            os.chdir(repo_dir)
+            run_cmd(f"git fetch {git_url} '*:*' --force --tags", check=True)
+        else:
+            print("📥 无本地缓存，执行全新 Bare Clone...")
+            run_cmd(f"git clone --bare {git_url} {repo_dir}", check=True)
+            os.chdir(repo_dir)
 
-        bare_repo_path = os.path.join(tmpdir, f"{repo_name}.git")
-        clone_cmd = f"git clone --bare https://github.com/{repo_path}.git {bare_repo_path}"
-        run_cmd(clone_cmd)
+        # 打上时间戳防删 Tag
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_cmd(f"git tag archive-{timestamp}")
+        
+        # 配置 Keybase Remote 并推送
+        kb_remote = f"keybase://private/{USERNAME}/{safe_name}"
+        run_cmd("git remote remove keybase || true") # 清理可能残留的 remote
+        run_cmd(f"git remote add keybase {kb_remote}")
+        
+        print("☁️ 正在推送到 Keybase...")
+        run_cmd("git push keybase --all --force", check=True)
+        run_cmd("git push keybase --tags", check=True)
+        
+        os.chdir("..")
+        print("✅ Git 代码备份/同步完成")
+        
+    except Exception as e:
+        print(f"🚨 Git 同步失败，跳过此仓库: {e}")
+        if os.path.exists(repo_dir) and os.getcwd().endswith(repo_dir):
+            os.chdir("..")
+        return # 跳过 release 下载，防止级联失败
 
-        timestamp = datetime.now().strftime("%Y%m%d")
-        tag_cmd = f"git -C {bare_repo_path} tag archive-{timestamp}"
-        run_cmd(tag_cmd)
-
-        remote_cmd = f"git -C {bare_repo_path} remote add keybase keybase://private/{USERNAME}/{repo_name}"
-        run_cmd(remote_cmd)
-
-        push_all_cmd = f"git -C {bare_repo_path} push keybase --all --force"
-        run_cmd(push_all_cmd)
-
-        push_tags_cmd = f"git -C {bare_repo_path} push keybase --tags"
-        run_cmd(push_tags_cmd)
-
-        print("Git backup done")
-
-    api_url = f"https://api.github.com/repos/{repo_path}/releases"
+    # ==========================================
+    # 2. Release 附件备份 (流式下载 + API分页)
+    # ==========================================
+    print(f"🔍 检查 {repo_path} 的 Releases...")
+    api_url = f"https://api.github.com/repos/{repo_path}/releases?per_page=100"
     headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
-    resp = requests.get(api_url, headers=headers)
-
-    if resp.status_code == 200:
+    
+    try:
+        resp = requests.get(api_url, headers=headers, timeout=10)
+        resp.raise_for_status()
         releases = resp.json()
-        kb_release_dir = f"/keybase/private/{USERNAME}/releases/{repo_name}"
-        run_cmd(f"keybase fs mkdir -p {kb_release_dir}")
+        
+        if not releases:
+            print("ℹ️ 该仓库没有 Release，跳过。")
+            return
 
+        kb_release_dir = f"/keybase/private/{USERNAME}/releases/{safe_name}"
+        run_cmd(f"keybase fs mkdir -p {kb_release_dir} || true")
+        
         for release in releases:
-            tag_name = release.get('tag_name', 'unknown_version')
+            tag_name = release.get('tag_name', 'unknown')
             for asset in release.get('assets', []):
                 file_name = f"{tag_name}_{asset['name']}"
                 kb_file_path = f"{kb_release_dir}/{file_name}"
-
-                check = run_cmd(f"keybase fs ls {kb_file_path}")
+                
+                # 判断文件是否已在 Keybase (使用 fs stat 提升准确性)
+                check = run_cmd(f"keybase fs stat {kb_file_path}")
                 if check.returncode != 0:
-                    print(f"  Download: {file_name}")
-                    r = requests.get(asset['browser_download_url'])
-                    with tempfile.NamedTemporaryFile(delete=False) as f:
-                        f.write(r.content)
-                        tmp_file = f.name
-
-                    run_cmd(f"keybase fs cp {tmp_file} {kb_file_path}")
-                    os.remove(tmp_file)
-                    print(f"  Saved: {file_name}")
-    else:
-        print("No releases or fetch failed.")
+                    print(f"  ⬇️ 下载大文件: {file_name} ({asset['size']/1024/1024:.2f} MB)")
+                    
+                    # 流式下载优化
+                    with requests.get(asset['browser_download_url'], stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        with open(file_name, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                    
+                    print(f"  ☁️ 上传到 Keybase FS...")
+                    run_cmd(f"keybase fs cp {file_name} {kb_file_path}", check=True)
+                    os.remove(file_name)
+                    print(f"  ✅ {file_name} 备份成功")
+                else:
+                    print(f"  ⏭️ {file_name} 已存在，跳过。")
+    except Exception as e:
+        print(f"🚨 Release 备份失败: {e}")
 
 if __name__ == "__main__":
+    if not os.path.exists("repos.txt"):
+        print("❌ 找不到 repos.txt 文件！")
+        sys.exit(1)
+        
     with open("repos.txt", "r") as f:
         repos = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-
+    
     for r in repos:
         backup_repo(r)
+    
+    print("\n🎉 所有仓库处理完毕！")

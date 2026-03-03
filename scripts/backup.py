@@ -78,8 +78,22 @@ def backup_repo(repo_url):
         run_cmd(f"git remote add keybase {kb_remote}")
         
         print("☁️ 正在推送到 Keybase...")
-        run_cmd("git push keybase --all --force", check=True)
-        run_cmd("git push keybase --tags", check=True)
+        
+        # 1. 尝试以镜像模式强制推送，这会强制让 Keybase 与本地（从源拉取）保持完全一致
+        # 这通常能解决由于远端和本地 Refs 不匹配导致的 rejected 问题
+        push_mirror_result = run_cmd("git push keybase --mirror --force", silent_error=True)
+        
+        if push_mirror_result.returncode != 0:
+            print("⚠️ 镜像推送失败，尝试降级为分步推送...")
+            # 2. 如果镜像推送失败，回退到原来的按引用推送，但移除 check=True
+            # 这样即使有部分特定的 tag 被拒绝，也不会抛出异常阻断整个流程
+            run_cmd("git push keybase --all --force", silent_error=True)
+            run_cmd("git push keybase --tags", silent_error=True)
+            
+            # 只要把刚刚打的防删时间戳 tag 推送成功即可
+            check_tag_push = run_cmd(f"git push keybase archive-{timestamp}")
+            if check_tag_push.returncode != 0:
+                raise Exception(f"关键防删 Tag 推送失败: archive-{timestamp}")
         
         os.chdir("..")
         print("✅ Git 代码备份/同步完成")

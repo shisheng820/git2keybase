@@ -8,13 +8,15 @@ from datetime import datetime
 USERNAME = os.environ.get('KEYBASE_USERNAME')
 GH_TOKEN = os.environ.get('GITHUB_TOKEN')
 
-def run_cmd(cmd, check=False):
+def run_cmd(cmd, check=False, silent_error=False):
     """运行终端命令，加入异常处理"""
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=check)
-        # 如果命令包含 "|| true" 或者是 "keybase fs mkdir" 且失败，不打印警告
-        if result.returncode != 0 and not check and "|| true" not in cmd:
-            print(f"⚠️ 提示/警告: {result.stderr.strip()}")
+        # 如果不是静默模式，且有错误输出，才打印警告
+        if result.returncode != 0 and not check and not silent_error:
+            err_msg = result.stderr.strip()
+            if err_msg: # 防止打印空的警告
+                print(f"⚠️ 提示/警告: {err_msg}")
         return result
     except subprocess.CalledProcessError as e:
         print(f"❌ 严重错误: 命令 '{cmd}' 执行失败\n{e.stderr}")
@@ -68,8 +70,8 @@ def backup_repo(repo_path):
             os.chdir("..")
         return # 跳过 release 下载，防止级联失败
 
-    # ==========================================
-    # 2. Release 附件备份 (流式下载 + API分页)
+# ==========================================
+    # 2. Release 附件备份 (只保留最新3个 + 自动清理)
     # ==========================================
     print(f"🔍 检查 {repo_path} 的 Releases...")
     api_url = f"https://api.github.com/repos/{repo_path}/releases?per_page=100"
@@ -84,34 +86,48 @@ def backup_repo(repo_path):
             print("ℹ️ 该仓库没有 Release，跳过。")
             return
 
-# 原来的代码:
-        # kb_release_dir = f"/keybase/private/{USERNAME}/releases/{safe_name}"
-        # run_cmd(f"keybase fs mkdir -p {kb_release_dir} || true")
-        
-        # 替换为以下修复后的代码 👇：
-        
-        # 1. 唤醒 KBFS 顶层目录 (解决懒加载问题)
+        # 核心修改：只截取前 3 个最新的 Release
+        top_releases = releases[:3]
+        keep_tags = [r.get('tag_name', 'unknown') for r in top_releases]
+        print(f"📌 目标备份版本 (Top 3): {', '.join(keep_tags)}")
+
+        # 唤醒和创建目录
         run_cmd(f"keybase fs ls /keybase/private/{USERNAME} > /dev/null 2>&1 || true")
-        
-        # 2. 逐级创建目录 (因为 keybase fs mkdir 不支持跨级创建)
         kb_release_base = f"/keybase/private/{USERNAME}/releases"
         kb_release_dir = f"{kb_release_base}/{safe_name}"
-        
-        run_cmd(f"keybase fs mkdir {kb_release_base} || true")
-        run_cmd(f"keybase fs mkdir {kb_release_dir} || true")
+        run_cmd(f"keybase fs mkdir {kb_release_base} || true", silent_error=True)
+        run_cmd(f"keybase fs mkdir {kb_release_dir} || true", silent_error=True)
 
-        for release in releases:
+        # ------------------------------
+        # 自动清理旧版本文件
+        # ------------------------------
+        print("🧹 开始检查并清理旧版本...")
+        ls_result = run_cmd(f"keybase fs ls {kb_release_dir}", silent_error=True)
+        if ls_result.returncode == 0:
+            existing_files = ls_result.stdout.splitlines()
+            for file in existing_files:
+                file = file.strip()
+                if not file: continue
+                
+                # 检查该文件是否属于我们要保留的 top 3 tags
+                # 因为我们存的时候文件名格式是 {tag_name}_{asset['name']}
+                if not any(file.startswith(f"{tag}_") for tag in keep_tags):
+                    print(f"  🗑️ 删除过期文件: {file}")
+                    run_cmd(f"keybase fs rm {kb_release_dir}/{file}")
+        # ------------------------------
+
+        # 开始备份这 3 个版本
+        for release in top_releases:
             tag_name = release.get('tag_name', 'unknown')
             for asset in release.get('assets', []):
                 file_name = f"{tag_name}_{asset['name']}"
                 kb_file_path = f"{kb_release_dir}/{file_name}"
                 
-                # 判断文件是否已在 Keybase (使用 fs stat 提升准确性)
-                check = run_cmd(f"keybase fs stat {kb_file_path}")
+                # 使用 silent_error=True 屏蔽掉 5103 报错
+                check = run_cmd(f"keybase fs stat {kb_file_path}", silent_error=True)
                 if check.returncode != 0:
                     print(f"  ⬇️ 下载大文件: {file_name} ({asset['size']/1024/1024:.2f} MB)")
                     
-                    # 流式下载优化
                     with requests.get(asset['browser_download_url'], stream=True, timeout=30) as r:
                         r.raise_for_status()
                         with open(file_name, 'wb') as f:
@@ -126,16 +142,3 @@ def backup_repo(repo_path):
                     print(f"  ⏭️ {file_name} 已存在，跳过。")
     except Exception as e:
         print(f"🚨 Release 备份失败: {e}")
-
-if __name__ == "__main__":
-    if not os.path.exists("repos.txt"):
-        print("❌ 找不到 repos.txt 文件！")
-        sys.exit(1)
-        
-    with open("repos.txt", "r") as f:
-        repos = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-    
-    for r in repos:
-        backup_repo(r)
-    
-    print("\n🎉 所有仓库处理完毕！")

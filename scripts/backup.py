@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import requests
+import urllib.parse
 from datetime import datetime
 
 # 获取环境变量
@@ -9,35 +10,55 @@ USERNAME = os.environ.get('KEYBASE_USERNAME')
 GH_TOKEN = os.environ.get('GITHUB_TOKEN')
 
 def run_cmd(cmd, check=False, silent_error=False):
-    """运行终端命令，加入异常处理"""
+    """运行终端命令，加入异常处理和静默模式"""
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=check)
-        # 如果不是静默模式，且有错误输出，才打印警告
         if result.returncode != 0 and not check and not silent_error:
             err_msg = result.stderr.strip()
-            if err_msg: # 防止打印空的警告
+            if err_msg:
                 print(f"⚠️ 提示/警告: {err_msg}")
         return result
     except subprocess.CalledProcessError as e:
         print(f"❌ 严重错误: 命令 '{cmd}' 执行失败\n{e.stderr}")
         raise
 
-def backup_repo(repo_path):
-    # 将 author/repo 转换为 author_repo，防止同名冲突
-    safe_name = repo_path.replace('/', '_')
+def backup_repo(repo_url):
     print(f"\n{'='*50}")
-    print(f"🚀 开始处理仓库: {repo_path} -> 映射为: {safe_name}")
+    print(f"🚀 开始处理仓库: {repo_url}")
     
-    # 注入 Token 以支持私有仓库 (HTTPS 方式)
-    git_url = f"https://x-access-token:{GH_TOKEN}@github.com/{repo_path}.git" if GH_TOKEN else f"https://github.com/{repo_path}.git"
+    # ---------------------------------------------------------
+    # 1. 智能解析 URL (兼容任意 Git 平台)
+    # ---------------------------------------------------------
+    parsed = urllib.parse.urlparse(repo_url)
+    domain = parsed.netloc
+    # 移除开头的斜杠和结尾的 .git，提取纯路径
+    path = parsed.path.lstrip('/')
+    if path.endswith('.git'):
+        path = path[:-4]
+        
+    # 生成安全的 Keybase 目录名 (例如 github.com/a/b -> github_com_a_b)
+    safe_name = f"{domain.replace('.', '_')}_{path.replace('/', '_')}"
+    print(f"📁 映射为本地/Keybase目录: {safe_name}")
+
+    # 判断是否为 GitHub，以此决定是否注入 Token 以及是否抓取 Release
+    is_github = (domain == "github.com")
+    
+    if is_github and GH_TOKEN:
+        # GitHub 仓库 + 有 Token：注入 Token 防限流/支持私有库
+        git_url = f"https://x-access-token:{GH_TOKEN}@github.com/{path}.git"
+        github_api_path = path
+    else:
+        # 其他 Git 平台 或 无 Token：直接匿名拉取原生 URL
+        git_url = repo_url
+        github_api_path = None
+
     repo_dir = f"{safe_name}.git"
 
     # ==========================================
-    # 1. 代码增量备份 (结合 Actions 缓存)
+    # 2. 代码增量备份 (所有平台通用)
     # ==========================================
     try:
-        # 确保 Keybase 存在该仓库 (即使存在报错也不中断)
-        run_cmd(f"keybase git create {safe_name} || true")
+        run_cmd(f"keybase git create {safe_name} || true", silent_error=True)
         
         if os.path.exists(repo_dir):
             print("📦 发现本地缓存，执行增量 Fetch...")
@@ -48,13 +69,12 @@ def backup_repo(repo_path):
             run_cmd(f"git clone --bare {git_url} {repo_dir}", check=True)
             os.chdir(repo_dir)
 
-        # 打上时间戳防删 Tag
+        # 锚定防删 Tag
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_cmd(f"git tag archive-{timestamp}")
         
-        # 配置 Keybase Remote 并推送
         kb_remote = f"keybase://private/{USERNAME}/{safe_name}"
-        run_cmd("git remote remove keybase || true") # 清理可能残留的 remote
+        run_cmd("git remote remove keybase || true", silent_error=True)
         run_cmd(f"git remote add keybase {kb_remote}")
         
         print("☁️ 正在推送到 Keybase...")
@@ -68,13 +88,17 @@ def backup_repo(repo_path):
         print(f"🚨 Git 同步失败，跳过此仓库: {e}")
         if os.path.exists(repo_dir) and os.getcwd().endswith(repo_dir):
             os.chdir("..")
-        return # 跳过 release 下载，防止级联失败
+        return # 跳过 release 下载
 
-# ==========================================
-    # 2. Release 附件备份 (只保留最新3个 + 自动清理)
     # ==========================================
-    print(f"🔍 检查 {repo_path} 的 Releases...")
-    api_url = f"https://api.github.com/repos/{repo_path}/releases?per_page=100"
+    # 3. Release 附件备份 (仅支持 GitHub API)
+    # ==========================================
+    if not is_github:
+        print(f"ℹ️ 检测到 {domain} 不是 GitHub，当前跳过 Release 备份。")
+        return
+
+    print(f"🔍 检查 GitHub Releases...")
+    api_url = f"https://api.github.com/repos/{github_api_path}/releases?per_page=100"
     headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
     
     try:
@@ -86,21 +110,17 @@ def backup_repo(repo_path):
             print("ℹ️ 该仓库没有 Release，跳过。")
             return
 
-        # 核心修改：只截取前 3 个最新的 Release
         top_releases = releases[:3]
         keep_tags = [r.get('tag_name', 'unknown') for r in top_releases]
         print(f"📌 目标备份版本 (Top 3): {', '.join(keep_tags)}")
 
-        # 唤醒和创建目录
         run_cmd(f"keybase fs ls /keybase/private/{USERNAME} > /dev/null 2>&1 || true")
         kb_release_base = f"/keybase/private/{USERNAME}/releases"
         kb_release_dir = f"{kb_release_base}/{safe_name}"
         run_cmd(f"keybase fs mkdir {kb_release_base} || true", silent_error=True)
         run_cmd(f"keybase fs mkdir {kb_release_dir} || true", silent_error=True)
 
-        # ------------------------------
         # 自动清理旧版本文件
-        # ------------------------------
         print("🧹 开始检查并清理旧版本...")
         ls_result = run_cmd(f"keybase fs ls {kb_release_dir}", silent_error=True)
         if ls_result.returncode == 0:
@@ -108,22 +128,16 @@ def backup_repo(repo_path):
             for file in existing_files:
                 file = file.strip()
                 if not file: continue
-                
-                # 检查该文件是否属于我们要保留的 top 3 tags
-                # 因为我们存的时候文件名格式是 {tag_name}_{asset['name']}
                 if not any(file.startswith(f"{tag}_") for tag in keep_tags):
                     print(f"  🗑️ 删除过期文件: {file}")
                     run_cmd(f"keybase fs rm {kb_release_dir}/{file}")
-        # ------------------------------
 
-        # 开始备份这 3 个版本
         for release in top_releases:
             tag_name = release.get('tag_name', 'unknown')
             for asset in release.get('assets', []):
                 file_name = f"{tag_name}_{asset['name']}"
                 kb_file_path = f"{kb_release_dir}/{file_name}"
                 
-                # 使用 silent_error=True 屏蔽掉 5103 报错
                 check = run_cmd(f"keybase fs stat {kb_file_path}", silent_error=True)
                 if check.returncode != 0:
                     print(f"  ⬇️ 下载大文件: {file_name} ({asset['size']/1024/1024:.2f} MB)")
@@ -142,3 +156,16 @@ def backup_repo(repo_path):
                     print(f"  ⏭️ {file_name} 已存在，跳过。")
     except Exception as e:
         print(f"🚨 Release 备份失败: {e}")
+
+if __name__ == "__main__":
+    if not os.path.exists("repos.txt"):
+        print("❌ 找不到 repos.txt 文件！")
+        sys.exit(1)
+        
+    with open("repos.txt", "r") as f:
+        repos = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    
+    for r in repos:
+        backup_repo(r)
+    
+    print("\n🎉 所有仓库处理完毕！")

@@ -110,7 +110,7 @@ def backup_repo(repo_url):
 # ==========================================
     # 3. Release 附件备份 (智能兼容 GitHub & Gitea/Forgejo)
     # ==========================================
-    print(f"🔍 尝试探测并检查 {domain} 的 Releases...")
+    print(f"🔍 尝试探测 {repo_name} 的 Releases...")
 
     # 根据域名智能组装 API URL
     if is_github:
@@ -127,7 +127,7 @@ def backup_repo(repo_url):
         
         # 如果返回 404 或其他非 200 状态，说明平台不支持此 API，优雅跳过
         if resp.status_code != 200:
-            print(f"ℹ️ 当前平台 {domain} 不支持兼容的 Release API 或无权访问 (HTTP {resp.status_code})，跳过 Release 备份。")
+            print(f"ℹ️ {repo_name} 不支持 Release API 或无权访问 (HTTP {resp.status_code})，跳过 Release 备份。")
             return
 
         releases = resp.json()

@@ -57,4 +57,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }} 
           # 传入 Gist 的 Raw 链接
           REPOS_GIST_URL: ${{ secrets.REPOS_GIST_URL }}
-        run: python scripts/backup.py
+        run: python -u scripts/backup.py

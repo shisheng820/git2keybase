@@ -222,7 +222,7 @@ if __name__ == "__main__":
         print(f"✅ 成功加载 {len(repos)} 个仓库配置。")
         
     except requests.exceptions.RequestException as e:
-        print(f"❌ 从 Gist 获取 repos.txt 失败: {e}")
+        print(f"❌ 从 Gist 获取仓库列表失败: {e}")
         sys.exit(1)
     
     # 遍历列表执行备份

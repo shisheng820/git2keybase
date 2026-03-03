@@ -2,4 +2,5 @@
 # Example:
 # your-username/your-private-repo
 # some-author/dmca-risk-repo
-bestruirui/octopus
+https://github.com/bestruirui/octopus
+https://git.um-react.app/um/cli

@@ -1,0 +1,4 @@
+# Add repositories to backup (one per line, format: owner/repo)
+# Example:
+# your-username/your-private-repo
+# some-author/dmca-risk-repo

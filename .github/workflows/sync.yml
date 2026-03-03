@@ -1,0 +1,45 @@
+name: Sync Repos & Releases to Keybase
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Keybase
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
+          curl -O https://prerelease.keybase.io/keybase_amd64.deb
+          sudo dpkg -i keybase_amd64.deb || sudo apt-get install -f -y
+          keybase version
+
+      - name: Login via Paper Key
+        env:
+          KEYBASE_USERNAME: ${{ secrets.KEYBASE_USERNAME }}
+          KEYBASE_PAPERKEY: ${{ secrets.KEYBASE_PAPERKEY }}
+        run: |
+          echo "$KEYBASE_PAPERKEY" | keybase oneshot --username="$KEYBASE_USERNAME"
+          keybase status
+
+      - name: Run Backup Script
+        env:
+          KEYBASE_USERNAME: ${{ secrets.KEYBASE_USERNAME }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/backup.py

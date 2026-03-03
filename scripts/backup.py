@@ -12,7 +12,8 @@ def run_cmd(cmd, check=False):
     """运行终端命令，加入异常处理"""
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=check)
-        if result.returncode != 0 and not check:
+        # 如果命令包含 "|| true" 或者是 "keybase fs mkdir" 且失败，不打印警告
+        if result.returncode != 0 and not check and "|| true" not in cmd:
             print(f"⚠️ 提示/警告: {result.stderr.strip()}")
         return result
     except subprocess.CalledProcessError as e:
@@ -83,9 +84,22 @@ def backup_repo(repo_path):
             print("ℹ️ 该仓库没有 Release，跳过。")
             return
 
-        kb_release_dir = f"/keybase/private/{USERNAME}/releases/{safe_name}"
-        run_cmd(f"keybase fs mkdir -p {kb_release_dir} || true")
+# 原来的代码:
+        # kb_release_dir = f"/keybase/private/{USERNAME}/releases/{safe_name}"
+        # run_cmd(f"keybase fs mkdir -p {kb_release_dir} || true")
         
+        # 替换为以下修复后的代码 👇：
+        
+        # 1. 唤醒 KBFS 顶层目录 (解决懒加载问题)
+        run_cmd(f"keybase fs ls /keybase/private/{USERNAME} > /dev/null 2>&1 || true")
+        
+        # 2. 逐级创建目录 (因为 keybase fs mkdir 不支持跨级创建)
+        kb_release_base = f"/keybase/private/{USERNAME}/releases"
+        kb_release_dir = f"{kb_release_base}/{safe_name}"
+        
+        run_cmd(f"keybase fs mkdir {kb_release_base} || true")
+        run_cmd(f"keybase fs mkdir {kb_release_dir} || true")
+
         for release in releases:
             tag_name = release.get('tag_name', 'unknown')
             for asset in release.get('assets', []):

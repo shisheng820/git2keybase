@@ -53,6 +53,8 @@ jobs:
       - name: Run Backup Script
         env:
           KEYBASE_USERNAME: ${{ secrets.KEYBASE_USERNAME }}
-          # 使用内置 token，如果需要备份其他私有库，请在 Secrets 设置个人访问令牌 (PAT) 并替换这里
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          # 【重要】如果你的 Gist 是私有的，建议在 Secrets 中配置一个带有 `gist` 权限的 PAT_TOKEN 来替换默认的 GITHUB_TOKEN
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }} 
+          # 传入 Gist 的 Raw 链接
+          REPOS_GIST_URL: ${{ secrets.REPOS_GIST_URL }}
         run: python scripts/backup.py

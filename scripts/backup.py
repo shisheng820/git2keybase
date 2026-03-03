@@ -196,13 +196,36 @@ def backup_repo(repo_url):
         print(f"🚨 Release 备份发生意外错误: {e}")
 
 if __name__ == "__main__":
-    if not os.path.exists("repos.txt"):
-        print("❌ 找不到 repos.txt 文件！")
+    # 从环境变量读取 Gist URL
+    gist_url = os.environ.get('REPOS_GIST_URL')
+    
+    if not gist_url:
+        print("❌ 未设置环境变量 REPOS_GIST_URL，无法获取仓库列表！")
         sys.exit(1)
         
-    with open("repos.txt", "r") as f:
-        repos = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+    print(f"📄 正在从 Gist 获取仓库列表...")
+    try:
+        # 如果是私有 Gist，通常 Raw URL 本身包含复杂的 ID 作为鉴权，直接 GET 即可。
+        # 但为了兼容性，如果环境变量中有 GITHUB_TOKEN，我们为其加上鉴权请求头。
+        headers = {"Authorization": f"token {GH_TOKEN}"} if GH_TOKEN else {}
+        resp = requests.get(gist_url, headers=headers, timeout=15)
+        resp.raise_for_status() # 检查 HTTP 状态码是否为 200
+        
+        # 解析文本内容
+        repos_content = resp.text
+        repos = [line.strip() for line in repos_content.splitlines() if line.strip() and not line.startswith('#')]
+        
+        if not repos:
+            print("⚠️ Gist 内容为空或没有找到有效的仓库 URL！")
+            sys.exit(1)
+            
+        print(f"✅ 成功加载 {len(repos)} 个仓库配置。")
+        
+    except requests.exceptions.RequestException as e:
+        print(f"❌ 从 Gist 获取 repos.txt 失败: {e}")
+        sys.exit(1)
     
+    # 遍历列表执行备份
     for r in repos:
         backup_repo(r)
     

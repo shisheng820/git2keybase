@@ -1,6 +1,6 @@
-# Add repositories to backup (one per line, format: owner/repo)
+# Add repositories to backup (one per line, format: https://github.com/owner/repo)
 # Example:
-# your-username/your-private-repo
-# some-author/dmca-risk-repo
+# https://github.com/your-username/your-private-repo
+# https://your-host.com/some-author/dmca-risk-repo
 https://github.com/bestruirui/octopus
 https://git.um-react.app/um/cli
